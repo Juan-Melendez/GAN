@@ -1,0 +1,266 @@
+# Juan Meléndez
+# 10159941
+
+
+
+# A Generative Adverserial Network for Sisemic Images
+
+
+
+# With work adapted from Deep Learning with Python By François Chollet and GOPH 699 notes by Daniel Trad.
+
+
+
+# Generative Adverserial Networks (GANs)  and Variational Autoencoders (VAEs) are currently some of the most widely used
+# methods for image generation. While VAEs are useful for creating continuous data (ie. a series of related images), GANs
+# are fantastic if high-quality images are desired. With GANs, life-like pictures can be created that are difficult to
+# distinguish from the real thing. For geoscientists, one useful application is explored here: a program that creates
+# unique synthetic seismic sections that are geologically plausible. Because GANs can generate a potentially infinite
+# number of images, these seismic images may be useful for training purposes, where the resources may otherwise scarce due
+# to factors such as proprietary ownership. In addition, the program is a proof of concept for GANs as a whole, and can be
+# easily adapted to non-geophysical scenarios.
+
+
+# As their name suggests, GANs generate images by placing two networks in an adverserial "game"; a generator network
+# continuously creates images, while a discriminator network compares the generated image to a real one and predicts
+# which one is real. Because the discriminator is blind to the image labels, its prediction provides feedback to the system
+# which allows it to fine-tune the generator, resulting in higher quality images with as more iterations are run.
+
+
+# Creating generator and descriminator networks from scratch can be quite complicated, but luckily there libraries that
+# allow simple ones to be created with less trouble.
+
+# Required libraries are imported:
+import keras
+from keras import layers
+from keras.preprocessing import image
+import numpy as np
+import cv2
+import os
+
+# The following is required to resolve a conflicting/duplicate libraries issue, but may not be necessary on all systems:
+os.environ['KMP_DUPLICATE_LIB_OK']='True'
+
+# Image parameters are set. In this case, the program is set to accept 32 x 32 pixel images. Larger images are possible,
+# but may increase an already lengthy computation time.
+latent_dim = 32
+height = 32
+width = 32
+channels = 1
+
+# Now the generator can be created. Keras provides useful functions for both the generator and discriminator.
+# Generators work by creating images in the latent space (raw data as opposed to a true image). The uniqueness of each
+# image is accomplished sampling a random noise vector every iteration, then running it through the generator which modifies
+# it to resemble a real image. With every cycle, changes in the generator's weights will improve this conversion, resulting
+# in better imaged. 
+generator_input = keras.Input(shape=(latent_dim,))
+
+# The unput must be converted into a 16 x 16 128-channels feature map:
+x = layers.Dense(128 * 16 * 16)(generator_input)
+
+# LeakyReLU is used in lieu of standard ReLU. It has less severe constraints as it allows small negative activation values.
+# Based on empirical evidence, this results in better results for GANs:
+x = layers.LeakyReLU()(x)
+x = layers.Reshape((16, 16, 128))(x)
+
+# Convolution layers are added, and upsimpling to 32 x 32 is done:
+x = layers.Conv2D(256, 5, padding='same')(x)
+x = layers.LeakyReLU()(x)
+
+# Upsampling to 32 x 32:
+x = layers.Conv2DTranspose(256, 4, strides=2, padding='same')(x)
+x = layers.LeakyReLU()(x)
+
+x = layers.Conv2D(256, 5, padding='same')(x)
+x = layers.LeakyReLU()(x)
+x = layers.Conv2D(256, 5, padding='same')(x)
+x = layers.LeakyReLU()(x)
+
+
+# Produce a 32 x 32 feature map, which is now the shape of the actual images.
+# Again, it has been emprically shown that a tanh activation is more effective that the more common sigmoid.
+x = layers.Conv2D(channels, 7, activation='tanh', padding='same')(x)
+generator = keras.models.Model(generator_input, x)
+generator.summary()
+
+
+# With the generator complete, the discriminator can now be created.
+# Discriminator is taken from keras and convolutional layers are implemented/ LeakyReLU is used as before:
+discriminator_input = layers.Input(shape=(height, width, channels))
+x = layers.Conv2D(128, 3)(discriminator_input)
+x = layers.LeakyReLU()(x)
+x = layers.Conv2D(128, 4, strides=2)(x)
+x = layers.LeakyReLU()(x)
+x = layers.Conv2D(128, 4, strides=2)(x)
+x = layers.LeakyReLU()(x)
+x = layers.Conv2D(128, 4, strides=2)(x)
+x = layers.LeakyReLU()(x)
+x = layers.Flatten()(x)
+
+# A dropput layer is included in the discrminator. This adds some randomness to the training, which helps prevent the
+# GAN from getting stuck in a false equilibrium where neither the generator nor discriminator improve:
+x = layers.Dropout(0.4)(x)
+
+# Classification layer
+x = layers.Dense(1, activation='sigmoid')(x)
+
+# The discriminator proper is instantiated. The input will be one real image and one generated image, and the descriminator
+# predicts which one is real and which one is not. A boolean value is given based on whether the decision was correct.
+discriminator = keras.models.Model(discriminator_input, x)
+discriminator.summary()
+
+# Learning rate decay is used for training purposes. This controls the rate at which weights are adjusted after every interval.
+# This value can be adjusted to reduce computational time, but requires fine-tuning as it can quickly cause instability.#
+discriminator_optimizer = keras.optimizers.RMSprop(lr=0.0008, clipvalue=1.0, decay=1e-8)
+discriminator.compile(optimizer=discriminator_optimizer, loss='binary_crossentropy')
+
+# Having the following set to true means the discriminator will also correct its weights based on its performance. This is
+# unwanted as it would cause it to always predict the real image, preventing a comparison between generated and real images.
+discriminator.trainable = False
+
+# Discriminator input se to match image properties.
+gan_input = keras.Input(shape=(latent_dim,))
+
+gan_output = discriminator(generator(gan_input))
+gan = keras.models.Model(gan_input, gan_output)
+
+gan_optimizer = keras.optimizers.RMSprop(lr=0.0004, clipvalue=1.0, decay=1e-8)
+gan.compile(optimizer=gan_optimizer, loss='binary_crossentropy')
+
+
+
+
+
+
+
+# An adverserial network is a zero-sum game; according to game theory,
+# The generator and the discriminator will eventually reach an equilibrium where neither can get an edge on the other. For the
+# discriminator, this means its accuracy rate will approach 50%.
+
+
+
+
+
+# With the generator and discriminator complete, images can now be imported.
+# Training set for seimic images (the real images) are pulled from a local directory.
+TRAIN_IMAGE_DIR = '/Users/Juan/Documents/Uni/GOPH 699/GANProject/GANimages/'
+
+# A list of the images is created:
+train_d = os.listdir(TRAIN_IMAGE_DIR)
+
+# The images are put in an array:
+x = [np.array(cv2.imread(TRAIN_IMAGE_DIR + p, cv2.IMREAD_GRAYSCALE), dtype=np.uint8) for p in train_d]
+
+# Image colour information is stored as RGB values, which have a range of 256 (0 to 255). In order to be processed,
+# the values must range from 0 to 1, so the entire dataset is simply divided by 255.
+x = np.array(x)/255
+
+# The seismic images are actually larger than required. They are therefore reduced to to the correct 32 x 32 dimensions:
+def resizeImage(img, size = 32):
+    imgR = np.zeros((img.shape[0],size,size))
+    for i in range(img.shape[0]):
+        imgR[i] = cv2.resize(img[i],(size,size))
+    return(imgR)
+
+x_train = resizeImage(x)
+
+# Data is normalized:
+x_train = x_train.reshape((x_train.shape[0],) + (height, width, channels)).astype('float32')
+
+# With the images imported and properly processed, the generator and discriminator can be linked to form the GAN proper.
+# An adverserial network is a zero-sum game; according to game theory, the generator and the discriminator will eventually
+# reach an equilibrium where neither can get an edge on the other. For the discriminator, this means its accuracy rate will
+# approach 50%. It is important to provide a large number of iterations so this point is reached before the for loop ends.
+
+# To appreciate the results, a save directory should be created where the generated image and real image as taken by the
+# discriminator are stored. Over more and more iterations, the generated image will more greatly resemble the real images.
+
+iterations = 10000
+batch_size = 20
+save_dir = '/Users/Juan/Documents/Uni/GOPH 699/GANProject/Results'
+
+# The GAN loop is created:
+start = 0
+for step in range(iterations):
+    
+    # The random noise vector is initialized:
+    random_latent_vectors = np.random.normal(size=(batch_size, latent_dim))
+
+    # The generator converts the random vector to latent-space images:
+    generated_images = generator.predict(random_latent_vectors)
+
+    # A real image is combined with the generated one:
+    stop = start + batch_size
+    real_images = x_train[start: stop]
+    combined_images = np.concatenate([generated_images, real_images])
+
+    # Properly label the fake and real images. The discriminator will be blind to these labels, but they are important
+    # when determining if the discriminator was correct or not:
+    labels = np.concatenate([np.ones((batch_size, 1)),
+                             np.zeros((batch_size, 1))])
+
+    # Random noise is added to the labels. Again, the addition of randomness helps prevent the GAN from becoming stuck:
+    labels += 0.05 * np.random.random(labels.shape)
+
+    # The discriminator is trained. Note the distinction from before; it is being trained to pick the "best" image,
+    # and not to always pick real:
+    d_loss = discriminator.train_on_batch(combined_images, labels)
+
+    # The generator input is created, which is really random points in latent space. Emperical evidence shows that
+    # picking from a normal distribution gives the best results:
+    random_latent_vectors = np.random.normal(size=(batch_size, latent_dim))
+
+    # The following makes the discriminator blind to the actual labels:
+    misleading_targets = np.zeros((batch_size, 1))
+
+    # Train the generator weights:
+    a_loss = gan.train_on_batch(random_latent_vectors, misleading_targets)
+    
+    start += batch_size
+    if start > len(x_train) - batch_size:
+      start = 0
+
+
+    # Currently the for loop will provide sample pairs every 100 iterations, but this can be changed if desired:
+    if step % 100 == 0:
+        # Save model weights
+        gan.save_weights('gan.h5')
+
+        # Discriminator and generator loss at every step is printed:
+        print('discriminator loss at step %s: %s' % (step, d_loss))
+        print('generator loss at step %s: %s' % (step, a_loss))
+
+        # Save the generated image:
+        img = image.array_to_img(generated_images[0] * 255., scale=False)
+        img.save(os.path.join('/Users/Juan/Documents/Uni/GOPH 699/GANProject/Results', 'generated_image' + str(step) + '.png'))
+
+        # Save the real image:
+        img = image.array_to_img(real_images[0] * 255., scale=False)
+        img.save(os.path.join('/Users/Juan/Documents/Uni/GOPH 699/GANProject/Results', 'real_image' + str(step) + '.png'))
+
+
+
+
+
+        import matplotlib.pyplot as plt
+
+# In reality, final results were not directly observed due to computational limitations. The need for so many iterations,
+# and perhaps limited hardware, result in excesive computation time (over 24 hours per attempt). This meant fine-tuning the
+# model to improve performance, such as by changing the learning rate, proved to be highly impractical. Nevertheless, progress
+# over the first 1000 iterations appeared to be on track, and the generated images did show improvement over greater time spans.
+
+# Once equilibrium is reached and training is complete, the GAN can now theoretically create syntheti images of similar
+# quality to the real ones. At this point weights are now set, so the generator can take any random vector and turn it into
+# something realistic.
+
+# Create a random noise vector:
+random_latent_vectors = np.random.normal(size=(10, latent_dim))
+
+# The vector is converted to an image, then taken from latent space and plotted:
+generated_images = generator.predict(random_latent_vectors)
+for i in range(generated_images.shape[0]):
+    img = image.array_to_img(generated_images[i] * 255., scale=False)
+    plt.figure()
+    plt.imshow(img)
+    
+plt.show()
